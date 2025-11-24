@@ -59,12 +59,30 @@ class CredentialManager:
         self.filepath = filepath
         self.latest_harvest: Optional[Dict[str, Any]] = None
         self.last_updated: float = 0
-        self.refresh_event = asyncio.Event() # Event to block requests during refresh
-        self.refresh_complete_event = asyncio.Event() # Event to signal UI is ready after refresh
-        self.refresh_lock = asyncio.Lock() # Lock to ensure only one refresh triggers at a time
-        self.refresh_event.set() # Initially set (not refreshing)
-        self.refresh_complete_event.set()
+        self._refresh_event = None
+        self._refresh_complete_event = None
+        self._refresh_lock = None
         self.load_from_disk()
+
+    @property
+    def refresh_event(self):
+        if self._refresh_event is None:
+            self._refresh_event = asyncio.Event()
+            self._refresh_event.set()
+        return self._refresh_event
+
+    @property
+    def refresh_complete_event(self):
+        if self._refresh_complete_event is None:
+            self._refresh_complete_event = asyncio.Event()
+            self._refresh_complete_event.set()
+        return self._refresh_complete_event
+
+    @property
+    def refresh_lock(self):
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+        return self._refresh_lock
 
     def load_from_disk(self):
         try:
