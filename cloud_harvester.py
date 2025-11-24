@@ -152,43 +152,58 @@ class CloudHarvester:
                 'button:has-text("Accept terms of use")' # Specific Terms button
             ]
             
-            # Special handling for "Demo Terms of Use" checkbox
+            # Special handling for "Demo Terms of Use" checkbox (English & Chinese support)
             try:
-                # 1. Try to scroll the dialog content to bottom (often required to enable checkbox)
+                # 1. Try to scroll the dialog content to bottom
                 dialog_content = 'div.mat-mdc-dialog-content'
                 if await self.page.is_visible(dialog_content):
                     print("   - Scrolling terms dialog...")
                     await self.page.evaluate(f"document.querySelector('{dialog_content}').scrollTop = document.querySelector('{dialog_content}').scrollHeight")
                     await asyncio.sleep(0.5)
 
-                # 2. Click Checkbox (Aggressive)
-                terms_checkbox_label = 'mat-checkbox:has-text("Accept terms of use")'
-                if await self.page.is_visible(terms_checkbox_label, timeout=2000):
-                    print("   - Found Terms of Use checkbox. Clicking...")
+                # 2. Click Checkbox (Support EN: "Accept terms of use" and CN: "接受使用条款")
+                # 使用逗号分隔选择器，表示“或”的关系
+                terms_checkbox_selector = 'mat-checkbox:has-text("Accept terms of use"), mat-checkbox:has-text("接受使用条款")'
+                
+                if await self.page.is_visible(terms_checkbox_selector, timeout=2000):
+                    print("   - Found Terms of Use checkbox (EN/CN). Clicking...")
                     # Try standard click first
                     try:
-                        await self.page.click(terms_checkbox_label, force=True, timeout=1000)
+                        await self.page.click(terms_checkbox_selector, force=True, timeout=1000)
                     except:
-                        # Fallback to JS click
+                        # Fallback to JS click (Find the specific visible input)
                         print("   - Standard click failed, trying JS click...")
-                        await self.page.evaluate(f"document.querySelector('{terms_checkbox_label} input').click()")
+                        # 注意：这里需要定位到具体的 input 元素
+                        await self.page.evaluate(f"""
+                            const cb = document.querySelector('mat-checkbox:has-text("Accept terms of use") input') || document.querySelector('mat-checkbox:has-text("接受使用条款") input');
+                            if(cb) cb.click();
+                        """)
                     
                     await asyncio.sleep(1.0)
                     
-                    # 3. Click Agree Button (Aggressive)
-                    agree_btn = 'button:has-text("Agree")'
-                    if await self.page.is_visible(agree_btn):
-                        print("   - Clicking Agree button...")
+                    # 3. Click Agree Button (Support EN: "Agree" and CN: "同意")
+                    agree_btn_selector = 'button:has-text("Agree"), button:has-text("同意")'
+                    
+                    if await self.page.is_visible(agree_btn_selector):
+                        print("   - Clicking Agree/同意 button...")
                         # Wait for it to be enabled
                         try:
-                            await self.page.wait_for_function(f"document.querySelector('{agree_btn}').disabled === false", timeout=2000)
+                            # 这里使用了 querySelector 查找第一个匹配项
+                            js_check_disabled = f"""
+                                (function() {{
+                                    const btn = document.querySelector('{agree_btn_selector}');
+                                    return btn && !btn.disabled;
+                                }})()
+                            """
+                            await self.page.wait_for_function(js_check_disabled, timeout=2000)
                         except:
                             print("   - Warning: Agree button might still be disabled.")
 
                         try:
-                            await self.page.click(agree_btn, force=True, timeout=1000)
+                            await self.page.click(agree_btn_selector, force=True, timeout=1000)
                         except:
-                             await self.page.evaluate(f"document.querySelectorAll('{agree_btn}').forEach(b => b.click())")
+                             # JS Click Fallback for all matching buttons
+                             await self.page.evaluate(f"document.querySelectorAll('button:has-text(\"Agree\"), button:has-text(\"同意\")').forEach(b => b.click())")
                         
                         await asyncio.sleep(2)
             except Exception as e:
