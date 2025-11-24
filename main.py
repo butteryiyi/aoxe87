@@ -1000,10 +1000,28 @@ async def websocket_endpoint(websocket: WebSocket):
             harvester_clients.remove(websocket)
 
 async def request_token_refresh():
-    print("🔄 Requesting token refresh from frontend...")
+    print("🔄 Requesting token refresh...")
+    
+    # 1. Trigger Cloud Harvester (if running)
+    if 'harvester' in globals() and harvester and harvester.is_running:
+        print("☁️ Triggering Cloud Harvester...")
+        # We don't await this because perform_harvest might take time,
+        # and we want to trigger WS clients too.
+        # But wait, perform_harvest is async. We should probably fire and forget or await?
+        # Since we are inside a request handler (stream_chat), awaiting might block.
+        # But we need the result.
+        # Actually, CloudHarvester loop runs periodically. We can force an immediate run.
+        # Let's add a method to CloudHarvester to force harvest.
+        asyncio.create_task(harvester.perform_harvest())
+        return # If we have a cloud harvester, we might not need WS clients, or maybe both?
+               # Let's try both just in case.
+
+    # 2. Trigger WebSocket Clients (Local Browser)
     if not harvester_clients:
         print("⚠️ No harvester clients connected!")
         return
+    
+    print("🔌 Requesting refresh from WebSocket clients...")
     
     message = json.dumps({"type": "refresh_token"})
     # Broadcast to all connected harvesters
