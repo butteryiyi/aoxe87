@@ -17,10 +17,6 @@ class CloudHarvester:
         self.last_harvest_time = 0
         self.current_cookies = os.environ.get(COOKIES_ENV_VAR)
         self.restart_requested = False
-        
-        # New: 状态标记
-        self.refresh_needed = False
-        self.last_login_retry_time = 0
 
     async def update_cookies(self, new_cookies_json):
         """Updates cookies and triggers a browser restart."""
@@ -33,17 +29,27 @@ class CloudHarvester:
         if self.is_running:
             return
         
+        if not self.current_cookies:
+            print("⚠️ Cloud Harvester: No cookies available. Waiting for update via /admin...")
+            # Wait loop for cookies
+            # while not self.current_cookies:
+            #     await asyncio.sleep(5)
+            # Allow proceeding without cookies based on user feedback (experimental)
+            print("⚠️ Cloud Harvester: Proceeding without cookies (Experimental).")
+        
         print("☁️ Cloud Harvester: Starting...")
         self.is_running = True
         
         while self.is_running:
             try:
                 async with async_playwright() as p:
+                    # Launch browser (headless=True for cloud)
                     self.browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
                     context = await self.browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     )
                     
+                    # Load Cookies
                     if self.current_cookies:
                         try:
                             cookies = json.loads(self.current_cookies)
@@ -57,196 +63,173 @@ class CloudHarvester:
 
                     self.page = await context.new_page()
                     
-                    # 1. 拦截请求
+                    # Setup Request Interception
                     await self.page.route("**/*", self.handle_route)
-                    # 2. 监听响应 (检测 401/403)
-                    self.page.on("response", self.handle_response)
                     
+                    # Navigate to Vertex AI
                     print(f"☁️ Cloud Harvester: Navigating to {VERTEX_URL}...")
                     try:
                         await self.page.goto(VERTEX_URL, timeout=60000, wait_until="domcontentloaded")
                     except Exception as e:
                         print(f"❌ Cloud Harvester: Navigation failed: {e}")
                     
+                    # Inner Loop (Session)
                     self.restart_requested = False
-                    self.refresh_needed = False
-                    
-                    # Inner Loop
                     while self.is_running and not self.restart_requested:
-                        
-                        # A. 自动刷新检测 (Recaptcha token invalid / 401 / 403)
-                        if self.refresh_needed:
-                            print("♻️ Cloud Harvester: Token invalid or expired. Refreshing page...")
-                            try:
-                                await self.page.reload(wait_until="domcontentloaded")
-                                self.refresh_needed = False
-                                await asyncio.sleep(5)
-                                await self.perform_harvest() # 立即尝试交互
-                            except Exception as e:
-                                print(f"⚠️ Refresh failed: {e}")
-                            continue
-
-                        # B. 登录页跳转检测
+                        # Check for Login Redirection (Cookie Expiry)
                         if "accounts.google.com" in self.page.url or "Sign in" in await self.page.title():
-                            current_time = time.time()
-                            if current_time - self.last_login_retry_time > 60:
-                                print("⚠️ Cloud Harvester: Redirected to Login. Trying to navigate back (Retry)...")
-                                self.last_login_retry_time = current_time
-                                try:
-                                    await self.page.goto(VERTEX_URL, wait_until="domcontentloaded")
-                                    await asyncio.sleep(5)
-                                    continue 
-                                except: pass
-                            else:
-                                print("❌ Cloud Harvester: Cookies Expired (Login Page detected).")
-                                break 
+                            print("❌ Cloud Harvester: Cookies Expired or Invalidated by Google (Login Page Detected).")
+                            print("   👉 Please export fresh cookies from your browser and update the GOOGLE_COOKIES variable.")
+                            # Stop trying to harvest to avoid account lock
+                            break
 
-                        # C. 定时采集
+                        # Check if we need to harvest (e.g., every 45 minutes or if credentials are missing)
                         if time.time() - self.last_harvest_time > 2700 or not self.cred_manager.latest_harvest:
                             await self.perform_harvest()
                         
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10) # Check every 10 seconds
                     
+                    # If we broke out of inner loop, close browser to restart or stop
                     await self.browser.close()
                     if self.restart_requested:
                         print("♻️ Cloud Harvester: Restarting with new cookies...")
 
             except Exception as e:
                 print(f"❌ Cloud Harvester Error: {e}")
+                print("♻️ Cloud Harvester: Crashed. Restarting in 10s...")
                 await asyncio.sleep(10)
         
         print("☁️ Cloud Harvester: Stopped.")
 
-    async def handle_response(self, response):
-        try:
-            # 检测接口错误，如果 Recaptcha 失效通常也会导致接口报错
-            if "batchGraphql" in response.url:
-                if response.status in [400, 401, 403]:
-                    # 400 经常对应 Bad Request (Recaptcha Token Invalid)
-                    # 401/403 对应 Auth 失效
-                    print(f"⚠️ Cloud Harvester: API returned {response.status}. Marking for refresh.")
-                    self.refresh_needed = True
-        except:
-            pass
-
     async def handle_route(self, route):
         request = route.request
+        
+        # Check if this is the target request
         if "batchGraphql" in request.url and request.method == "POST":
             try:
                 post_data = request.post_data
-                # 只要是生成内容的请求，都尝试抓取
                 if post_data and ("StreamGenerateContent" in post_data or "generateContent" in post_data):
                     print("🎯 Cloud Harvester: Captured Target Request!")
+                    
+                    # Extract Headers
+                    headers = request.headers
+                    
+                    # Construct Harvest Data
                     harvest_data = {
                         "url": request.url,
                         "method": request.method,
-                        "headers": request.headers,
+                        "headers": headers,
                         "body": post_data
                     }
+                    
+                    # Update Credential Manager
                     self.cred_manager.update(harvest_data)
                     self.last_harvest_time = time.time()
-                    self.last_login_retry_time = 0 
+                    
+                    # Signal that the refresh sequence is complete
+                    # In Cloud Harvester mode, capturing the request implies the UI interaction is done.
+                    print("☁️ Cloud Harvester: Signaling refresh complete.")
+                    self.cred_manager.refresh_complete_event.set()
+
             except Exception as e:
                 print(f"⚠️ Cloud Harvester: Error analyzing request: {e}")
+
         await route.continue_()
 
     async def perform_harvest(self):
         print("🤖 Cloud Harvester: Attempting to trigger request...")
-        if not self.page: return
+        if not self.page:
+            return
 
         try:
-            # ============================================================
-            # 1. 处理条款弹窗 (修复了 SyntaxError)
-            # 使用原生 JS 遍历元素，替代不兼容的 Selector
-            # ============================================================
-            dialog_content = 'div.mat-mdc-dialog-content'
-            if await self.page.is_visible(dialog_content):
-                print("🧹 Cloud Harvester: Terms Dialog detected. Handling via JS...")
-                
-                # 1.1 滚动 (防止点击被遮挡)
-                await self.page.evaluate(f"""
-                    const d = document.querySelector('{dialog_content}');
-                    if(d) d.scrollTop = d.scrollHeight;
-                """)
-                await asyncio.sleep(0.5)
+            # --- Popup Handling ---
+            # Try to close common popups/dialogs that might block interaction
+            print("🧹 Cloud Harvester: Checking for popups...")
+            popup_selectors = [
+                'button[aria-label="Close"]',
+                'button[aria-label="Dismiss"]',
+                'button:has-text("Got it")',
+                'button:has-text("Not now")',
+                'button:has-text("No thanks")',
+                'button:has-text("Agree")', # Consent screens
+                'div[role="dialog"] button:has-text("Close")',
+                'div[role="dialog"] button:has-text("OK")',
+                'button:has-text("Accept terms of use")' # Specific Terms button
+            ]
+            
+            # Special handling for "Demo Terms of Use" checkbox
+            try:
+                # 1. Try to scroll the dialog content to bottom (often required to enable checkbox)
+                dialog_content = 'div.mat-mdc-dialog-content'
+                if await self.page.is_visible(dialog_content):
+                    print("   - Scrolling terms dialog...")
+                    await self.page.evaluate(f"document.querySelector('{dialog_content}').scrollTop = document.querySelector('{dialog_content}').scrollHeight")
+                    await asyncio.sleep(0.5)
 
-                # 1.2 查找并勾选 (原生 JS 查找包含文本的元素)
-                await self.page.evaluate("""
-                    // 查找包含 Accept 或 接受 的 checkbox
-                    const checkboxes = Array.from(document.querySelectorAll('mat-checkbox'));
-                    const targetCb = checkboxes.find(cb => 
-                        cb.innerText.includes("Accept terms of use") || 
-                        cb.innerText.includes("接受使用条款")
-                    );
+                # 2. Click Checkbox (Aggressive)
+                terms_checkbox_label = 'mat-checkbox:has-text("Accept terms of use")'
+                if await self.page.is_visible(terms_checkbox_label, timeout=2000):
+                    print("   - Found Terms of Use checkbox. Clicking...")
+                    # Try standard click first
+                    try:
+                        await self.page.click(terms_checkbox_label, force=True, timeout=1000)
+                    except:
+                        # Fallback to JS click
+                        print("   - Standard click failed, trying JS click...")
+                        await self.page.evaluate(f"document.querySelector('{terms_checkbox_label} input').click()")
                     
-                    if (targetCb) {
-                        // 尝试点击 input 元素，如果没有则点击 host
-                        const input = targetCb.querySelector('input');
-                        if (input) input.click();
-                        else targetCb.click();
-                    }
-                """)
-                
-                print("   - Checkbox ticked (if found). Waiting for button...")
-                await asyncio.sleep(1.5)
-
-                # 1.3 查找并点击同意按钮 (原生 JS)
-                await self.page.evaluate("""
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const agreeBtn = buttons.find(b => 
-                        (b.innerText.includes("Agree") || b.innerText.includes("同意")) && 
-                        !b.innerText.includes("Disagree") // 防止误触
-                    );
+                    await asyncio.sleep(1.0)
                     
-                    if (agreeBtn) {
-                        agreeBtn.disabled = false; // 移除禁用状态
-                        agreeBtn.click();
-                    }
-                """)
-                
-                # 等待弹窗消失
-                try:
-                    await self.page.wait_for_selector(dialog_content, state='hidden', timeout=3000)
-                    print("   - Dialog closed.")
-                except: pass
+                    # 3. Click Agree Button (Aggressive)
+                    agree_btn = 'button:has-text("Agree")'
+                    if await self.page.is_visible(agree_btn):
+                        print("   - Clicking Agree button...")
+                        # Wait for it to be enabled
+                        try:
+                            await self.page.wait_for_function(f"document.querySelector('{agree_btn}').disabled === false", timeout=2000)
+                        except:
+                            print("   - Warning: Agree button might still be disabled.")
 
-            # 处理普通提示弹窗 (Got it / Close)
-            # 这里使用 Playwright 选择器是安全的，因为这些是标准 CSS
-            popup_selectors = ['button[aria-label="Close"]', 'button[aria-label="Dismiss"]', 'button:has-text("Got it")', 'button:has-text("OK")']
+                        try:
+                            await self.page.click(agree_btn, force=True, timeout=1000)
+                        except:
+                             await self.page.evaluate(f"document.querySelectorAll('{agree_btn}').forEach(b => b.click())")
+                        
+                        await asyncio.sleep(2)
+            except Exception as e:
+                print(f"   - Terms check failed (ignorable): {e}")
+
             for selector in popup_selectors:
                 try:
-                    if await self.page.is_visible(selector):
+                    if await self.page.is_visible(selector, timeout=500):
+                        print(f"   - Closing popup: {selector}")
                         await self.page.click(selector)
-                except: pass
+                        await asyncio.sleep(1)
+                except:
+                    pass
+            # ----------------------
 
-            # ============================================================
-            # 2. 发送文本 "Hello"
-            # ============================================================
+            # Wait for editor
             editor_selector = 'div[contenteditable="true"]'
-            
-            print("⏳ Cloud Harvester: Waiting for editor...")
             try:
-                # 等待编辑器出现
-                await self.page.wait_for_selector(editor_selector, state="visible", timeout=8000)
-                
-                # 确保焦点
-                await self.page.click(editor_selector, force=True)
-                
-                # 清空并输入
-                await self.page.evaluate(f"document.querySelector('{editor_selector}').innerText = ''")
-                await self.page.fill(editor_selector, "Hello")
-                await asyncio.sleep(0.5)
-                
-                print("🚀 Cloud Harvester: Sending 'Hello'...")
-                await self.page.press(editor_selector, "Enter")
-                
-                # 等待网络请求被 handle_route 捕获
+                await self.page.wait_for_selector(editor_selector, timeout=10000)
+            except:
+                print("⚠️ Cloud Harvester: Editor not found. Reloading page...")
+                await self.page.reload(wait_until="domcontentloaded")
                 await asyncio.sleep(5)
-                
-            except Exception as e:
-                print(f"⚠️ Editor interaction skipped: {e}")
-                # 如果找不到编辑器，可能是页面还在加载，或者需要刷新
-                # 可以在这里不做处理，依靠 handle_response 来决定是否刷新
+                return
 
+            # Type "Hello"
+            await self.page.click(editor_selector)
+            await self.page.fill(editor_selector, "Hello")
+            await asyncio.sleep(1)
+            
+            # Press Enter
+            await self.page.press(editor_selector, "Enter")
+            print("🚀 Cloud Harvester: Sent 'Hello' message.")
+            
+            # Wait a bit to ensure request is captured
+            await asyncio.sleep(5)
+            
         except Exception as e:
             print(f"❌ Cloud Harvester: Interaction failed: {e}")

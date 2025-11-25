@@ -562,15 +562,20 @@ class VertexAIClient:
                         
                         # Check for potential token expiration
                         if response.status_code in [400, 401, 403] and attempt < max_retries:
-                            print(f"⚠️ Auth Error ({response.status_code}). Triggering UI refresh and waiting...")
+                            print(f"⚠️ Auth Error ({response.status_code}). Handling refresh...")
                             
-                            # Trigger UI Refresh
-                            await request_token_refresh()
+                            async with cred_manager.refresh_lock:
+                                # Check if credentials were just updated by another thread
+                                if time.time() - cred_manager.last_updated < 10:
+                                    print("ℹ️ Credentials recently updated. Retrying with new token...")
+                                    refreshed = True
+                                else:
+                                    print("🔄 Triggering UI refresh and waiting...")
+                                    await request_token_refresh()
+                                    refreshed = await cred_manager.wait_for_refresh(timeout=45)
                             
-                            # Wait for new credentials
-                            refreshed = await cred_manager.wait_for_refresh(timeout=45)
                             if refreshed:
-                                print("✅ Credentials refreshed! Waiting 1s before retrying request...")
+                                print("✅ Credentials ready! Waiting 1s before retrying request...")
                                 await asyncio.sleep(1) # Add 1 second delay
                                 # Update headers/url with new credentials
                                 new_creds = cred_manager.get_credentials()
@@ -658,28 +663,36 @@ class VertexAIClient:
             except AuthError as e:
                 print(f"⚠️ Auth Error caught in stream: {e}")
                 if attempt < max_retries:
-                    print("🔄 Triggering refresh and retrying...")
-                    await request_token_refresh()
-                    # Step 1: Wait for the new credentials to be harvested
-                    refreshed = await cred_manager.wait_for_refresh(timeout=60)
-                    if refreshed:
-                        # Step 2: Wait for the frontend to confirm the UI is stable
-                        ui_ready = await cred_manager.wait_for_refresh_complete(timeout=60)
-                        if ui_ready:
-                            print("✅ Credentials and UI ready! Waiting 1s before retrying request...")
-                            await asyncio.sleep(1) # Add 1 second delay
-                            # Update headers/url with new credentials
-                            new_creds = cred_manager.get_credentials()
-                            headers = new_creds['headers'].copy()
-                            headers['content-type'] = 'application/json'
-                            headers.pop('content-length', None)
-                            headers.pop('host', None)
-                            url = new_creds['url']
-                            continue # Retry the request
+                    async with cred_manager.refresh_lock:
+                        # Check if credentials were just updated by another thread
+                        if time.time() - cred_manager.last_updated < 10:
+                            print("ℹ️ Credentials recently updated. Retrying with new token...")
+                            refreshed = True
+                            ui_ready = True
                         else:
-                            print("❌ Frontend UI did not become ready in time.")
+                            print("🔄 Triggering refresh and retrying...")
+                            await request_token_refresh()
+                            # Step 1: Wait for the new credentials to be harvested
+                            refreshed = await cred_manager.wait_for_refresh(timeout=60)
+                            if refreshed:
+                                # Step 2: Wait for the frontend to confirm the UI is stable
+                                ui_ready = await cred_manager.wait_for_refresh_complete(timeout=60)
+                            else:
+                                ui_ready = False
+
+                    if refreshed and ui_ready:
+                        print("✅ Credentials and UI ready! Waiting 1s before retrying request...")
+                        await asyncio.sleep(1) # Add 1 second delay
+                        # Update headers/url with new credentials
+                        new_creds = cred_manager.get_credentials()
+                        headers = new_creds['headers'].copy()
+                        headers['content-type'] = 'application/json'
+                        headers.pop('content-length', None)
+                        headers.pop('host', None)
+                        url = new_creds['url']
+                        continue # Retry the request
                     else:
-                        print("❌ Credential refresh timed out.")
+                        print("❌ Credential refresh failed or timed out.")
 
                 error_payload = {"error": {"message": str(e), "type": "authentication_error"}}
                 yield f"data: {json.dumps(error_payload)}\n\n"
