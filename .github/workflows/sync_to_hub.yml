@@ -10,11 +10,12 @@ jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4 # 建议使用 v4，这是最新版本
         with:
           fetch-depth: 0
           lfs: true
       - name: Push to hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push --force https://kilo:$HF_TOKEN@huggingface.co/spaces/xiaoyuxyz/v
+        # 关键修改在这里：将 kilo 替换为您的用户名 xiaoyuxyz
+        run: git push --force https://xiaoyuxyz:$HF_TOKEN@huggingface.co/spaces/xiaoyuxyz/v main
