@@ -10,11 +10,17 @@ jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      # 1. Checkout a copy of your repository
+      #    - fetch-depth: 0 fetches all history so you can push
+      #    - lfs: true downloads LFS files if you have any
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: true
+
+      # 2. Push to your Hugging Face Space
+      #    - The URL is now corrected to your username (xiaoyuxyz) and your Space name (v)
       - name: Push to hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push --force https://kilo:$HF_TOKEN@huggingface.co/spaces/killuqq/try main
+        run: git push --force https://xiaoyuxyz:$HF_TOKEN@huggingface.co/spaces/xiaoyuxyz/v main
